@@ -6,7 +6,7 @@ RUN apk add --no-cache musl-dev
 WORKDIR /build
 COPY Cargo.toml Cargo.lock* ./
 # Cache dependencies
-RUN mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release 2>/dev/null; rm -rf src
+RUN mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release 2>/dev/null; rm -rf src target/release/domofon target/release/deps/domofon-*
 
 COPY src/ ./src/
 RUN cargo build --release
