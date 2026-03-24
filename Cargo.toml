@@ -23,5 +23,5 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 [profile.release]
 opt-level = "z"
 lto = true
-strip = true
+strip = "debuginfo"
 codegen-units = 1

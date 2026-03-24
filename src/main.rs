@@ -66,11 +66,24 @@ async fn main() {
         .fallback_service(ServeDir::new("public").append_index_html_on_directories(true))
         .with_state(app_state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+    let port: u16 = std::env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(3000);
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("Server running at http://{}", addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!("Failed to bind to {}: {}", addr, e);
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = axum::serve(listener, app).await {
+        tracing::error!("Server error: {}", e);
+        std::process::exit(1);
+    }
 }
 
 fn spawn_token_refresh(state: SharedState) {

@@ -22,6 +22,9 @@ COPY public/ /app/public/
 
 RUN mkdir -p /app/data
 
+ENV RUST_LOG=info
+ENV RUST_BACKTRACE=1
+
 EXPOSE 3000
 EXPOSE 15060/udp
 
