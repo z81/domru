@@ -1,0 +1,13 @@
+services:
+  domofon:
+    build: .
+    container_name: domofon
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+      - "15060:15060/udp"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - TZ=Europe/Moscow
+      - WEBHOOK_URL=${WEBHOOK_URL:-}

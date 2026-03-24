@@ -1,0 +1,1248 @@
+<!DOCTYPE html>
+<html lang="ru" class="h-full bg-zinc-950">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Домофон</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+  <style>
+    .live-badge {
+      position: absolute;
+      top: 0.5rem;
+      left: 0.5rem;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+      padding: 0.25rem 0.5rem;
+      border-radius: 0.375rem;
+      background: rgba(220, 38, 38, 0.85);
+      font-size: 0.6875rem;
+      font-weight: 600;
+      color: white;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      pointer-events: none;
+    }
+    .live-badge::before {
+      content: '';
+      width: 0.5rem;
+      height: 0.5rem;
+      border-radius: 50%;
+      background: white;
+      animation: blink 1s ease-in-out infinite;
+    }
+    @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+    .snapshot-crossfade {
+      position: absolute;
+      inset: 0;
+      object-fit: cover;
+      width: 100%;
+      height: 100%;
+      transition: opacity 0.4s ease-in-out;
+    }
+    .snapshot-crossfade.behind { opacity: 0; z-index: 1; }
+    .snapshot-crossfade.front { opacity: 1; z-index: 2; }
+    .live-badge, .device-video-close, .device-video-controls { z-index: 10 !important; }
+    .device-video-loading { z-index: 10 !important; }
+    .tl-mark { position: absolute; top: 0; bottom: 0; min-width: 2px; border-radius: 1px; }
+    .tl-mark-motion { background: rgba(34,197,94,0.6); }
+    .tl-mark-call { background: rgba(239,68,68,0.7); }
+    .tl-bar:hover .tl-tooltip { display: block; }
+    .device-media:fullscreen { background: black; }
+    .device-media:fullscreen .device-video { object-fit: contain; }
+    .device-media:fullscreen .device-video-controls { position: fixed; bottom: 0; left: 0; right: 0; }
+  </style>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: { 500: '#6366f1', 600: '#4f46e5', 700: '#4338ca' }
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="h-full text-zinc-100 antialiased">
+
+<div id="app" class="min-h-full flex items-center justify-center p-4">
+  <div id="root" class="w-full max-w-3xl space-y-6"></div>
+</div>
+
+<!-- Templates -->
+<template id="tpl-loading">
+  <div class="flex flex-col items-center gap-4 py-20">
+    <div class="h-8 w-8 animate-spin rounded-full border-2 border-zinc-600 border-t-brand-500"></div>
+    <p class="text-sm text-zinc-400">Загрузка...</p>
+  </div>
+</template>
+
+<template id="tpl-phone-form">
+  <div class="space-y-6">
+    <div class="text-center space-y-2">
+      <h1 class="text-2xl font-semibold tracking-tight">Домофон</h1>
+      <p class="text-sm text-zinc-400">Введите номер телефона для входа</p>
+    </div>
+    <form id="phone-form" class="space-y-4">
+      <div>
+        <label class="block text-sm font-medium text-zinc-300 mb-1.5">Номер телефона</label>
+        <input
+          id="phone-input"
+          type="tel"
+          placeholder="79001234567"
+          autocomplete="tel"
+          class="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3.5 py-2.5 text-sm text-zinc-100 placeholder-zinc-500 outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition"
+        />
+      </div>
+      <button
+        type="submit"
+        class="w-full rounded-lg bg-brand-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-brand-700 active:bg-brand-800 transition disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        Получить код
+      </button>
+      <p id="phone-error" class="text-sm text-red-400 hidden"></p>
+    </form>
+  </div>
+</template>
+
+<template id="tpl-contract-select">
+  <div class="space-y-6">
+    <div class="text-center space-y-2">
+      <h1 class="text-2xl font-semibold tracking-tight">Выберите адрес</h1>
+      <p class="text-sm text-zinc-400">На номере несколько договоров</p>
+    </div>
+    <div id="contracts-list" class="space-y-2"></div>
+    <p id="contract-error" class="text-sm text-red-400 hidden"></p>
+    <button
+      id="contract-back-btn"
+      type="button"
+      class="w-full text-sm text-zinc-400 hover:text-zinc-200 transition"
+    >
+      Изменить номер
+    </button>
+  </div>
+</template>
+
+<template id="tpl-code-form">
+  <div class="space-y-6">
+    <div class="text-center space-y-2">
+      <h1 class="text-2xl font-semibold tracking-tight">Код подтверждения</h1>
+      <p class="text-sm text-zinc-400">SMS отправлено на <span id="code-phone" class="text-zinc-200"></span></p>
+    </div>
+    <form id="code-form" class="space-y-4">
+      <div>
+        <label class="block text-sm font-medium text-zinc-300 mb-1.5">Код из SMS</label>
+        <input
+          id="code-input"
+          type="text"
+          inputmode="numeric"
+          placeholder="Введите код"
+          autocomplete="one-time-code"
+          class="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3.5 py-2.5 text-sm text-zinc-100 placeholder-zinc-500 outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition tracking-widest text-center text-lg"
+        />
+      </div>
+      <button
+        type="submit"
+        class="w-full rounded-lg bg-brand-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-brand-700 active:bg-brand-800 transition disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        Войти
+      </button>
+      <p id="code-error" class="text-sm text-red-400 hidden"></p>
+      <button
+        type="button"
+        id="back-btn"
+        class="w-full text-sm text-zinc-400 hover:text-zinc-200 transition"
+      >
+        Изменить номер
+      </button>
+    </form>
+  </div>
+</template>
+
+<template id="tpl-dashboard">
+  <div class="space-y-5 w-full">
+    <div class="flex items-center justify-between">
+      <h1 class="text-xl font-semibold tracking-tight">Домофон</h1>
+      <div class="flex items-center gap-3">
+        <button id="settings-btn" class="text-xs text-zinc-500 hover:text-zinc-300 transition">⚙ Настройки</button>
+        <button id="logout-btn" class="text-xs text-zinc-500 hover:text-zinc-300 transition">Выйти</button>
+      </div>
+    </div>
+    <div id="call-banner" class="hidden rounded-lg border border-amber-600/50 bg-amber-950/50 px-4 py-3 animate-pulse">
+      <div class="flex items-center gap-3">
+        <span class="text-lg">🔔</span>
+        <div>
+          <p class="text-sm font-medium text-amber-200">Входящий звонок!</p>
+          <p id="call-banner-text" class="text-xs text-amber-300/70"></p>
+        </div>
+      </div>
+    </div>
+    <div id="settings-panel" class="hidden rounded-xl border border-zinc-800 bg-zinc-900 p-4 space-y-3">
+      <h3 class="text-sm font-medium text-zinc-300">Настройки уведомлений</h3>
+      <div>
+        <label class="block text-xs text-zinc-500 mb-1">Webhook URL (POST при звонке)</label>
+        <input id="webhook-input" type="url" placeholder="https://example.com/webhook"
+          class="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 outline-none focus:border-brand-500 transition" />
+      </div>
+      <div class="flex items-center gap-3">
+        <button id="save-config-btn" class="rounded-lg bg-brand-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-700 transition">Сохранить</button>
+        <button id="test-notify-btn" class="rounded-lg bg-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-600 transition">Тест уведомления</button>
+      </div>
+    </div>
+    <div id="place-tabs" class="flex gap-1.5 overflow-x-auto pb-1 -mx-1 px-1"></div>
+    <div id="devices-grid" class="space-y-4"></div>
+    <div id="events-panel" class="rounded-xl border border-zinc-800 bg-zinc-900 overflow-hidden hidden">
+      <div class="flex items-center justify-between px-4 py-3 border-b border-zinc-800">
+        <h3 class="text-sm font-medium text-zinc-300">События камеры</h3>
+        <span id="events-count" class="text-xs text-zinc-500"></span>
+      </div>
+      <div id="events-list" class="divide-y divide-zinc-800/50 max-h-96 overflow-y-auto"></div>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-device-card">
+  <div class="rounded-xl border border-zinc-800 bg-zinc-900 overflow-hidden">
+    <div class="device-media relative bg-zinc-800 aspect-video hidden">
+      <img class="device-snapshot w-full h-full object-cover cursor-pointer" alt="Камера" />
+      <div class="device-play-icon absolute inset-0 flex items-center justify-center pointer-events-none">
+        <div class="rounded-full bg-black/50 p-4">
+          <svg class="w-10 h-10 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+        </div>
+      </div>
+      <video class="device-video w-full h-full object-cover hidden" autoplay playsinline muted></video>
+      <div class="device-video-loading absolute inset-0 flex items-center justify-center bg-black/60 hidden">
+        <div class="h-6 w-6 animate-spin rounded-full border-2 border-zinc-600 border-t-white"></div>
+      </div>
+      <div class="device-live-badge live-badge hidden">LIVE</div>
+      <button class="device-video-close absolute top-2 end-2 rounded-full bg-black/60 p-1.5 text-white hover:bg-black/80 transition hidden">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+      <!-- Video controls bar -->
+      <div class="device-video-controls absolute bottom-14 inset-x-0 flex items-center gap-2 px-3 py-2 hidden">
+        <button class="vc-mute rounded p-1 text-white/80 hover:text-white transition" title="Звук">
+          <svg class="vc-icon-muted w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2"/></svg>
+          <svg class="vc-icon-unmuted w-5 h-5 hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.536 8.464a5 5 0 010 7.072M18.364 5.636a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z"/></svg>
+        </button>
+        <input class="vc-volume w-20 h-1 accent-white cursor-pointer" type="range" min="0" max="1" step="0.05" value="0.5" />
+      </div>
+      <button class="vc-fullscreen absolute top-2 start-2 rounded-full bg-black/60 p-1.5 text-white hover:bg-black/80 transition hidden" style="z-index:10" title="Полный экран">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5v-4m0 4h-4m4 0l-5-5"/></svg>
+      </button>
+      <!-- Timeline bar with event marks -->
+      <div class="device-timeline absolute bottom-0 inset-x-0 px-2 hidden" style="z-index:11">
+        <div class="flex items-center gap-1">
+          <button class="tl-prev shrink-0 rounded bg-zinc-700 p-1.5 text-white hover:bg-zinc-600 transition" title="Предыдущее событие">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
+          </button>
+          <div class="tl-bar relative h-6 bg-zinc-800/80 rounded cursor-pointer group flex-1">
+            <div class="tl-marks absolute inset-0 rounded overflow-hidden"></div>
+            <div class="tl-cursor absolute top-0 bottom-0 w-0.5 bg-white pointer-events-none" style="left:100%"></div>
+            <div class="tl-tooltip absolute -top-7 bg-black/90 text-white text-xs px-2 py-0.5 rounded pointer-events-none hidden whitespace-nowrap"></div>
+          </div>
+          <button class="tl-right shrink-0 rounded bg-zinc-700 p-1.5 text-white hover:bg-zinc-600 transition" title="Следующее событие">
+            <svg class="tl-right-arrow w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
+            <span class="tl-right-live text-[10px] font-bold leading-4 hidden">LIVE</span>
+          </button>
+        </div>
+      </div>
+    </div>
+    <div class="p-4 space-y-3">
+      <div class="flex items-center justify-between">
+        <div>
+          <h3 class="device-name font-medium text-sm"></h3>
+          <p class="device-meta text-xs text-zinc-500"></p>
+        </div>
+        <button
+          class="device-open-btn rounded-full bg-green-600 p-3 text-white hover:bg-green-700 active:bg-green-800 transition disabled:opacity-50 disabled:cursor-not-allowed hidden"
+          title="Открыть дверь"
+        >
+          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 11V7a4 4 0 118 0m-4 8v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2z"/></svg>
+        </button>
+      </div>
+      <div class="device-entrances flex flex-wrap gap-2"></div>
+    </div>
+  </div>
+</template>
+
+<script>
+const root = document.getElementById('root');
+
+// ─── State ──────────────────────────────────────
+let phone = '';
+let selectedContract = null;
+let places = [];
+let selectedPlace = null;
+let devices = [];
+let snapshotIntervals = [];
+let activeHls = null;
+let slideshowTimer = null;
+
+// ─── API helpers ────────────────────────────────
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    method: opts.method || 'GET',
+    headers: opts.body ? { 'Content-Type': 'application/json' } : {},
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  return res.json();
+}
+
+function cloneTemplate(id) {
+  const tpl = document.getElementById(id);
+  return tpl.content.cloneNode(true);
+}
+
+function clearRoot() {
+  snapshotIntervals.forEach(clearInterval);
+  snapshotIntervals = [];
+  if (activeHls) {
+    activeHls.destroy();
+    activeHls = null;
+  }
+  if (slideshowTimer) {
+    clearInterval(slideshowTimer);
+    slideshowTimer = null;
+  }
+  root.textContent = '';
+}
+
+// ─── Views ──────────────────────────────────────
+function showLoading() {
+  clearRoot();
+  root.appendChild(cloneTemplate('tpl-loading'));
+}
+
+function showPhoneForm() {
+  clearRoot();
+  const frag = cloneTemplate('tpl-phone-form');
+  root.appendChild(frag);
+
+  const input = document.getElementById('phone-input');
+  const form = document.getElementById('phone-form');
+  const errEl = document.getElementById('phone-error');
+  input.value = phone;
+
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const btn = form.querySelector('button[type=submit]');
+    phone = input.value.trim();
+    if (!phone) return;
+
+    btn.disabled = true;
+    btn.textContent = 'Отправка...';
+    errEl.classList.add('hidden');
+
+    try {
+      const res = await api('/api/login', { method: 'POST', body: { phone } });
+      if (res.error) throw new Error(res.error);
+      const result = res.data;
+      if (result.needsContract) {
+        showContractSelect(result.contracts);
+      } else {
+        showCodeForm();
+      }
+    } catch (err) {
+      errEl.textContent = err.message;
+      errEl.classList.remove('hidden');
+      btn.disabled = false;
+      btn.textContent = 'Получить код';
+    }
+  };
+}
+
+function showContractSelect(contracts) {
+  clearRoot();
+  const frag = cloneTemplate('tpl-contract-select');
+  root.appendChild(frag);
+
+  const listEl = document.getElementById('contracts-list');
+  const errEl = document.getElementById('contract-error');
+
+  contracts.forEach((contract) => {
+    const btn = document.createElement('button');
+    btn.className = 'w-full text-start rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-3 hover:border-brand-500 hover:bg-zinc-800 transition disabled:opacity-50';
+
+    const addr = document.createElement('span');
+    addr.className = 'block text-sm font-medium text-zinc-100';
+    addr.textContent = contract.address;
+    btn.appendChild(addr);
+
+    const meta = document.createElement('span');
+    meta.className = 'block text-xs text-zinc-500 mt-0.5';
+    meta.textContent = 'Договор ' + contract.accountId;
+    btn.appendChild(meta);
+
+    btn.onclick = async () => {
+      listEl.querySelectorAll('button').forEach(b => { b.disabled = true; });
+      btn.classList.add('border-brand-500');
+      errEl.classList.add('hidden');
+
+      try {
+        const res = await api('/api/select-contract', {
+          method: 'POST',
+          body: { phone, contract },
+        });
+        if (res.error) throw new Error(res.error);
+        selectedContract = contract;
+        showCodeForm();
+      } catch (err) {
+        errEl.textContent = err.message;
+        errEl.classList.remove('hidden');
+        listEl.querySelectorAll('button').forEach(b => { b.disabled = false; });
+        btn.classList.remove('border-brand-500');
+      }
+    };
+
+    listEl.appendChild(btn);
+  });
+
+  document.getElementById('contract-back-btn').onclick = () => showPhoneForm();
+}
+
+function showCodeForm() {
+  clearRoot();
+  const frag = cloneTemplate('tpl-code-form');
+  root.appendChild(frag);
+
+  document.getElementById('code-phone').textContent = phone;
+  const codeInput = document.getElementById('code-input');
+  codeInput.focus();
+
+  document.getElementById('back-btn').onclick = () => showPhoneForm();
+
+  document.getElementById('code-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const btn = e.target.querySelector('button[type=submit]');
+    const errEl = document.getElementById('code-error');
+    const code = codeInput.value.trim();
+    if (!code) return;
+
+    btn.disabled = true;
+    btn.textContent = 'Проверка...';
+    errEl.classList.add('hidden');
+
+    try {
+      const res = await api('/api/confirm', { method: 'POST', body: { phone, code, contract: selectedContract } });
+      if (res.error) throw new Error(res.error);
+      requestNotificationPermission();
+      connectSSE();
+      await loadDashboard();
+    } catch (err) {
+      errEl.textContent = err.message;
+      errEl.classList.remove('hidden');
+      btn.disabled = false;
+      btn.textContent = 'Войти';
+    }
+  };
+}
+
+async function loadDashboard() {
+  showLoading();
+  try {
+    const placesRes = await api('/api/places');
+    if (placesRes.error) throw new Error(placesRes.error);
+    places = placesRes.data || [];
+
+    if (places.length > 0 && !selectedPlace) {
+      selectedPlace = places[0];
+    }
+    if (selectedPlace) {
+      await loadDevices(selectedPlace.place.id);
+    }
+    showDashboard();
+  } catch (err) {
+    if (err.message.includes('401') || err.message.includes('Unauthorized')) {
+      showPhoneForm();
+    } else {
+      showPhoneForm();
+    }
+  }
+}
+
+async function loadDevices(placeId) {
+  try {
+    const res = await api('/api/places/' + placeId + '/accesscontrols');
+    if (res.error) throw new Error(res.error);
+    devices = res.data || [];
+  } catch {
+    devices = [];
+  }
+}
+
+function showDashboard() {
+  clearRoot();
+  const frag = cloneTemplate('tpl-dashboard');
+  root.appendChild(frag);
+
+  // Place tabs
+  const tabsEl = document.getElementById('place-tabs');
+  if (places.length <= 1) {
+    tabsEl.classList.add('hidden');
+  } else {
+    places.forEach((p, i) => {
+      const btn = document.createElement('button');
+      const isActive = selectedPlace && selectedPlace.place.id === p.place.id;
+      btn.className = 'px-3 py-1.5 rounded-md text-sm transition whitespace-nowrap ' +
+        (isActive ? 'bg-zinc-700 text-white font-medium' : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800');
+      const addr = p.place.address.visibleAddress + (p.place.address.apartment ? ', кв. ' + p.place.address.apartment : '');
+      btn.textContent = addr;
+      btn.onclick = async () => {
+        selectedPlace = places[i];
+        showLoading();
+        await loadDevices(selectedPlace.place.id);
+        showDashboard();
+      };
+      tabsEl.appendChild(btn);
+    });
+  }
+
+  // Device cards
+  const grid = document.getElementById('devices-grid');
+  if (devices.length === 0) {
+    const p = document.createElement('p');
+    p.className = 'text-sm text-zinc-500 text-center py-8';
+    p.textContent = 'Нет устройств';
+    grid.appendChild(p);
+    return;
+  }
+
+  devices.forEach((device, idx) => {
+    const cardFrag = cloneTemplate('tpl-device-card');
+    const card = cardFrag.querySelector('div');
+
+    // Camera media (snapshot + stream)
+    const mediaWrap = card.querySelector('.device-media');
+    const img = card.querySelector('.device-snapshot');
+    const video = card.querySelector('.device-video');
+    const videoLoading = card.querySelector('.device-video-loading');
+    const videoClose = card.querySelector('.device-video-close');
+    const liveBadge = card.querySelector('.device-live-badge');
+
+    const isSip = device.type === 'SIP';
+    const placeId = selectedPlace.place.id;
+
+    if (device.externalCameraId || isSip) {
+      let snapshotUrl;
+      if (isSip) {
+        snapshotUrl = () => '/api/snapshot/' + placeId + '/' + device.id + '?type=SIP&t=' + Date.now();
+      } else {
+        snapshotUrl = () => '/api/snapshot/' + device.externalCameraId + '?w=640&h=360&t=' + Date.now();
+      }
+      img.src = snapshotUrl();
+      mediaWrap.classList.remove('hidden');
+      img.onerror = () => { /* keep last good snapshot visible */ };
+      const interval = setInterval(() => {
+        if (!slideshowTimer) {
+          const testImg = new Image();
+          testImg.onload = () => { img.src = testImg.src; };
+          testImg.src = snapshotUrl();
+        }
+      }, 30000);
+      snapshotIntervals.push(interval);
+
+      if (device.externalCameraId) {
+        img.onclick = () => startStream(device.externalCameraId, video, img, videoLoading, videoClose);
+        videoClose.onclick = () => stopStream(video, img, videoLoading, videoClose);
+      }
+    }
+
+    // Name & meta
+    card.querySelector('.device-name').textContent = device.name;
+    card.querySelector('.device-meta').textContent = '';
+
+    // Open button
+    if (device.allowOpen) {
+      const openBtn = card.querySelector('.device-open-btn');
+      openBtn.classList.remove('hidden');
+      openBtn.onclick = () => handleOpenDoor(openBtn, device);
+    }
+
+    // Entrances
+    const entrancesEl = card.querySelector('.device-entrances');
+    (device.entrances || []).forEach(ent => {
+      const btn = document.createElement('button');
+      btn.className = 'px-3 py-1.5 rounded-md bg-zinc-700 text-sm text-zinc-200 hover:bg-zinc-600 transition disabled:opacity-50';
+      btn.textContent = ent.name;
+      btn.onclick = () => handleOpenEntrance(btn, device.id, ent.id, ent.name);
+      entrancesEl.appendChild(btn);
+    });
+
+    grid.appendChild(card);
+  });
+
+  // Settings panel
+  const settingsBtn = document.getElementById('settings-btn');
+  const settingsPanel = document.getElementById('settings-panel');
+  const webhookInput = document.getElementById('webhook-input');
+  const saveConfigBtn = document.getElementById('save-config-btn');
+  const testNotifyBtn = document.getElementById('test-notify-btn');
+
+  settingsBtn.onclick = () => {
+    settingsPanel.classList.toggle('hidden');
+    if (!settingsPanel.classList.contains('hidden')) {
+      api('/api/config').then(cfg => { webhookInput.value = cfg.callWebhookUrl || ''; });
+    }
+  };
+
+  saveConfigBtn.onclick = async () => {
+    await api('/api/config', { method: 'POST', body: { callWebhookUrl: webhookInput.value.trim() } });
+    saveConfigBtn.textContent = 'Сохранено!';
+    setTimeout(() => { saveConfigBtn.textContent = 'Сохранить'; }, 2000);
+  };
+
+  testNotifyBtn.onclick = () => {
+    showCallNotification({ eventType: 'Тестовый звонок', date: new Date().toISOString() });
+  };
+
+  // Logout
+  document.getElementById('logout-btn').onclick = async () => {
+    await api('/api/logout', { method: 'POST' });
+    if (eventSource) { eventSource.close(); eventSource = null; }
+    places = [];
+    devices = [];
+    selectedPlace = null;
+    showPhoneForm();
+  };
+
+  // Load events
+  const sipDevice = devices.find(d => d.externalCameraId);
+  if (sipDevice) {
+    loadEvents(sipDevice.externalCameraId);
+  }
+}
+
+const EVENT_TYPES = {
+  121: { label: 'Звонок', icon: '🔔', color: 'text-amber-400' },
+  126: { label: 'Движение', icon: '🚶', color: 'text-blue-400' },
+};
+
+function jumpToEvent(cameraId, timestamp) {
+  const media = document.querySelector('.device-media');
+  if (!media) return;
+  const video = media.querySelector('.device-video');
+  const img = media.querySelector('.device-snapshot');
+  const loading = media.querySelector('.device-video-loading');
+  const closeBtn = media.querySelector('.device-video-close');
+  const rightBtn = media.querySelector('.tl-right');
+
+  // Scroll to video
+  media.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  currentArchiveTs = timestamp;
+  loadArchive(cameraId, timestamp, video, img, loading, closeBtn, rightBtn);
+}
+
+async function loadEvents(cameraId) {
+  const panel = document.getElementById('events-panel');
+  const list = document.getElementById('events-list');
+  const countEl = document.getElementById('events-count');
+  if (!panel || !list) return;
+
+  try {
+    const res = await api('/api/events/' + cameraId);
+    const events = res.data || [];
+    if (events.length === 0) return;
+
+    panel.classList.remove('hidden');
+    countEl.textContent = '';
+    list.innerHTML = '';
+
+    // Show last 50 events, newest first (API returns newest first)
+    const shown = events.slice(0, 50);
+    for (const ev of shown) {
+      const info = EVENT_TYPES[ev.EventSubjectID] || { label: 'Событие #' + ev.EventSubjectID, icon: '📹', color: 'text-zinc-400' };
+      const time = new Date(ev.Time * 1000);
+      const timeStr = time.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      const dateStr = time.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+      const dur = ev.Duration >= 60 ? Math.floor(ev.Duration / 60) + ' мин ' + (ev.Duration % 60) + ' сек' : ev.Duration + ' сек';
+
+      const row = document.createElement('div');
+      row.className = 'flex items-center gap-3 px-4 py-2.5 hover:bg-zinc-800/50 transition cursor-pointer';
+      row.innerHTML =
+        '<span class="text-base shrink-0">' + info.icon + '</span>' +
+        '<div class="min-w-0 flex-1">' +
+          '<div class="flex items-center gap-2">' +
+            '<span class="text-xs font-medium ' + info.color + '">' + info.label + '</span>' +
+            '<span class="text-[10px] text-zinc-600">' + dur + '</span>' +
+          '</div>' +
+          '<p class="text-[11px] text-zinc-500 truncate">' + dateStr + ' ' + timeStr + '</p>' +
+        '</div>';
+      row.onclick = () => jumpToEvent(cameraId, ev.Time);
+      list.appendChild(row);
+    }
+  } catch (err) {
+    console.error('[Events] load error:', err);
+  }
+}
+
+// ─── Slideshow (SIP cameras) ─────────────────────
+const SLIDESHOW_INTERVAL_MS = 1500;
+
+function startSlideshow(snapshotUrlFn, img, loading, closeBtn, liveBadge) {
+  if (slideshowTimer) {
+    clearInterval(slideshowTimer);
+    slideshowTimer = null;
+  }
+
+  // Create double-buffer for crossfade
+  const parent = img.parentElement;
+  let imgA = parent.querySelector('.snapshot-a');
+  let imgB = parent.querySelector('.snapshot-b');
+  if (!imgA) {
+    imgA = document.createElement('img');
+    imgA.className = 'snapshot-crossfade snapshot-a front';
+    imgA.alt = 'Камера';
+    imgB = document.createElement('img');
+    imgB.className = 'snapshot-crossfade snapshot-b behind';
+    imgB.alt = 'Камера';
+    parent.insertBefore(imgB, parent.firstChild);
+    parent.insertBefore(imgA, parent.firstChild);
+  }
+
+  img.classList.add('hidden');
+  loading.classList.remove('hidden');
+  closeBtn.classList.remove('hidden');
+
+  let useA = true;
+  let pending = false;
+
+  const tick = () => {
+    if (pending) return;
+    pending = true;
+    const next = useA ? imgA : imgB;
+    const prev = useA ? imgB : imgA;
+    const testImg = new Image();
+    testImg.onload = () => {
+      next.src = testImg.src;
+      next.classList.remove('behind');
+      next.classList.add('front');
+      prev.classList.remove('front');
+      prev.classList.add('behind');
+      useA = !useA;
+      loading.classList.add('hidden');
+      liveBadge.classList.remove('hidden');
+      pending = false;
+    };
+    testImg.onerror = () => { pending = false; };
+    testImg.src = snapshotUrlFn();
+  };
+
+  tick();
+  slideshowTimer = setInterval(tick, SLIDESHOW_INTERVAL_MS);
+}
+
+function stopSlideshow(img, loading, closeBtn, liveBadge) {
+  if (slideshowTimer) {
+    clearInterval(slideshowTimer);
+    slideshowTimer = null;
+  }
+  // Remove crossfade layers
+  const parent = img.parentElement;
+  const imgA = parent.querySelector('.snapshot-a');
+  const imgB = parent.querySelector('.snapshot-b');
+  if (imgA) imgA.remove();
+  if (imgB) imgB.remove();
+
+  img.classList.remove('hidden');
+  loading.classList.add('hidden');
+  closeBtn.classList.add('hidden');
+  liveBadge.classList.add('hidden');
+}
+
+// ─── HLS Stream (forpost cameras) ────────────────
+function stopStream(video, img, loading, closeBtn) {
+  if (activeHls) {
+    activeHls.destroy();
+    activeHls = null;
+  }
+  video.pause();
+  video.removeAttribute('src');
+  video.classList.add('hidden');
+  loading.classList.add('hidden');
+  closeBtn.classList.add('hidden');
+  img.classList.remove('hidden');
+  const playIcon = img.parentElement?.querySelector('.device-play-icon');
+  if (playIcon) playIcon.classList.remove('hidden');
+  const media = video.closest('.device-media');
+  const controls = media?.querySelector('.device-video-controls');
+  if (controls) controls.classList.add('hidden');
+  const fsBtn = media?.querySelector('.vc-fullscreen');
+  if (fsBtn) fsBtn.classList.add('hidden');
+  const tl = media?.querySelector('.device-timeline');
+  if (tl) tl.classList.add('hidden');
+  isArchiveMode = false;
+}
+
+function showStreamError(container, text) {
+  let toast = container.querySelector('.stream-toast');
+  if (toast) toast.remove();
+  toast = document.createElement('div');
+  toast.className = 'stream-toast absolute bottom-14 inset-x-2 rounded-md bg-zinc-900/90 px-3 py-2 text-xs text-zinc-400 text-center';
+  toast.textContent = text || 'Стрим недоступен';
+  container.appendChild(toast);
+  setTimeout(() => { toast.remove(); }, 4000);
+}
+
+function setupVideoControls(video) {
+  const media = video.closest('.device-media');
+  if (!media) return;
+  const bar = media.querySelector('.device-video-controls');
+  if (!bar) return;
+  bar.classList.remove('hidden');
+
+  const muteBtn = bar.querySelector('.vc-mute');
+  const iconMuted = bar.querySelector('.vc-icon-muted');
+  const iconUnmuted = bar.querySelector('.vc-icon-unmuted');
+  const volumeSlider = bar.querySelector('.vc-volume');
+  const fsBtn = media.querySelector('.vc-fullscreen');
+  if (fsBtn) fsBtn.classList.remove('hidden');
+
+  function updateMuteIcons() {
+    if (video.muted) {
+      iconMuted.classList.remove('hidden');
+      iconUnmuted.classList.add('hidden');
+    } else {
+      iconMuted.classList.add('hidden');
+      iconUnmuted.classList.remove('hidden');
+    }
+  }
+
+  muteBtn.onclick = () => {
+    video.muted = !video.muted;
+    if (!video.muted) video.volume = parseFloat(volumeSlider.value) || 0.5;
+    updateMuteIcons();
+  };
+
+  volumeSlider.oninput = () => {
+    const vol = parseFloat(volumeSlider.value);
+    video.volume = vol;
+    video.muted = vol === 0;
+    updateMuteIcons();
+  };
+
+  fsBtn.onclick = () => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      media.requestFullscreen().catch(() => {});
+    }
+  };
+
+  updateMuteIcons();
+}
+
+// ─── Timeline ────────────────────────────────────
+let timelineEvents = [];
+let isArchiveMode = false;
+let currentArchiveTs = 0;
+
+function setupTimeline(media, cameraId, video, img, loading, closeBtn) {
+  const tl = media.querySelector('.device-timeline');
+  if (!tl) return;
+
+  const bar = tl.querySelector('.tl-bar');
+  const marksEl = tl.querySelector('.tl-marks');
+  const tooltip = tl.querySelector('.tl-tooltip');
+  const liveBtn = tl.querySelector('.tl-live');
+
+  // Load events and fit timeline to their range
+  const now = Math.floor(Date.now() / 1000);
+
+  fetch('/api/events/' + cameraId)
+    .then(r => r.json())
+    .then(data => {
+      const events = data.data || data || [];
+      if (!Array.isArray(events) || events.length === 0) return;
+      timelineEvents = events;
+      const rangeStart = now - 79200;
+      const rangeEnd = now;
+      tl.dataset.start = rangeStart;
+      tl.dataset.end = rangeEnd;
+      tl.classList.remove('hidden');
+      renderMarks(marksEl, events, rangeStart, rangeEnd);
+      const cursor = tl.querySelector('.tl-cursor');
+      const nowPct = Math.max(0, Math.min(100, ((now - rangeStart) / (rangeEnd - rangeStart)) * 100));
+      cursor.style.left = nowPct + '%';
+      updateNavButtons();
+    })
+    .catch(() => {});
+
+  // Hover — show time tooltip
+  bar.onmousemove = (e) => {
+    const rangeStart = parseInt(tl.dataset.start || '0');
+    const rangeEnd = parseInt(tl.dataset.end || '0');
+    const range = rangeEnd - rangeStart;
+    if (range <= 0) return;
+    const rect = bar.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const ts = rangeStart + pct * range;
+    const d = new Date(ts * 1000);
+    const dd = String(d.getDate()).padStart(2, '0');
+    const mo = String(d.getMonth() + 1).padStart(2, '0');
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    tooltip.textContent = dd + '.' + mo + ' ' + hh + ':' + mm;
+    tooltip.style.left = (pct * 100) + '%';
+    tooltip.style.transform = 'translateX(-50%)';
+
+    const nearby = findNearbyEvent(timelineEvents, ts, range * 0.01);
+    if (nearby) {
+      const type = nearby.EventSubjectID === 121 ? 'Звонок' : 'Движение';
+      const dur = nearby.Duration || 0;
+      tooltip.textContent = dd + '.' + mo + ' ' + hh + ':' + mm + ' · ' + type + ' (' + dur + 'с)';
+    }
+  };
+
+  // Click — load archive at that timestamp
+  bar.onclick = (e) => {
+    const rangeStart = parseInt(tl.dataset.start || '0');
+    const rangeEnd = parseInt(tl.dataset.end || '0');
+    const range = rangeEnd - rangeStart;
+    if (range <= 0) return;
+    const rect = bar.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const ts = Math.floor(rangeStart + pct * range);
+    loadArchive(cameraId, ts, video, img, loading, closeBtn, rightBtn);
+    setTimeout(updateNavButtons, 500);
+  };
+
+  // Prev/Next event buttons
+  const prevBtn = tl.querySelector('.tl-prev');
+  const nextBtn = tl.querySelector('.tl-next');
+
+  const rightBtn = tl.querySelector('.tl-right');
+  const rightArrow = tl.querySelector('.tl-right-arrow');
+  const rightLive = tl.querySelector('.tl-right-live');
+
+  function updateNavButtons() {
+    const sorted = [...timelineEvents].filter(e => e.Time > 0).sort((a, b) => a.Time - b.Time);
+    const now = Math.floor(Date.now() / 1000);
+    const ref = isArchiveMode ? (currentArchiveTs || now) : now;
+    const hasPrev = sorted.some(e => e.Time < ref - 5);
+    prevBtn.disabled = !hasPrev;
+    prevBtn.classList.toggle('opacity-30', !hasPrev);
+
+    if (isArchiveMode) {
+      // Show LIVE button
+      rightArrow.classList.add('hidden');
+      rightLive.classList.remove('hidden');
+      rightBtn.classList.remove('bg-zinc-800/80', 'opacity-30');
+      rightBtn.classList.add('bg-red-600/80');
+      rightBtn.disabled = false;
+      rightBtn.title = 'Вернуться к прямому эфиру';
+    } else {
+      // Show next arrow
+      rightArrow.classList.remove('hidden');
+      rightLive.classList.add('hidden');
+      rightBtn.classList.remove('bg-red-600/80');
+      rightBtn.classList.add('bg-zinc-800/80');
+      const hasNext = sorted.some(e => e.Time > ref + 5);
+      rightBtn.disabled = !hasNext;
+      rightBtn.classList.toggle('opacity-30', !hasNext);
+      rightBtn.title = 'Следующее событие';
+    }
+  }
+  updateNavButtons();
+
+  prevBtn.onclick = () => {
+    const sorted = [...timelineEvents].filter(e => e.Time > 0).sort((a, b) => a.Time - b.Time);
+    const ref = currentArchiveTs || Math.floor(Date.now() / 1000);
+    const prev = sorted.filter(e => e.Time < ref - 5).pop();
+    if (prev) {
+      currentArchiveTs = prev.Time;
+      loadArchive(cameraId, prev.Time, video, img, loading, closeBtn, rightBtn);
+      setTimeout(updateNavButtons, 500);
+    }
+  };
+
+  rightBtn.onclick = () => {
+    if (isArchiveMode) {
+      // Go to LIVE
+      isArchiveMode = false;
+      currentArchiveTs = 0;
+      startStream(cameraId, video, img, loading, closeBtn);
+      setTimeout(updateNavButtons, 500);
+    } else {
+      // Next event
+      const sorted = [...timelineEvents].filter(e => e.Time > 0).sort((a, b) => a.Time - b.Time);
+      const ref = currentArchiveTs || 0;
+      const next = sorted.find(e => e.Time > ref + 5);
+      if (next) {
+        currentArchiveTs = next.Time;
+        loadArchive(cameraId, next.Time, video, img, loading, closeBtn, rightBtn);
+        setTimeout(updateNavButtons, 500);
+      }
+    }
+  };
+}
+
+function renderMarks(container, events, startTs, endTs) {
+  container.innerHTML = '';
+  const range = endTs - startTs;
+  if (range <= 0) return;
+  for (const ev of events) {
+    const t = ev.Time || 0;
+    const dur = ev.Duration || 1;
+    if (t < startTs || t > endTs) continue;
+    const left = ((t - startTs) / range) * 100;
+    const width = Math.max(0.3, (dur / range) * 100);
+    const isCall = ev.EventSubjectID === 121;
+    const mark = document.createElement('div');
+    mark.className = 'tl-mark ' + (isCall ? 'tl-mark-call' : 'tl-mark-motion');
+    mark.style.left = left + '%';
+    mark.style.width = width + '%';
+    container.appendChild(mark);
+  }
+}
+
+function findNearbyEvent(events, ts, threshold) {
+  let best = null, bestDist = threshold;
+  for (const ev of events) {
+    const d = Math.abs((ev.Time || 0) - ts);
+    if (d < bestDist) { bestDist = d; best = ev; }
+  }
+  return best;
+}
+
+async function loadArchive(cameraId, ts, video, img, loading, closeBtn, liveBtn) {
+  isArchiveMode = true;
+  currentArchiveTs = ts;
+  if (activeHls) { activeHls.destroy(); activeHls = null; }
+  img.classList.add('hidden');
+  const playIcon = img.parentElement?.querySelector('.device-play-icon');
+  if (playIcon) playIcon.classList.add('hidden');
+  loading.classList.remove('hidden');
+
+  try {
+    const res = await api('/api/archive/' + cameraId + '?ts=' + ts + '&tz=10800');
+    if (res.error) throw new Error(res.error);
+    const streamUrl = res.url;
+
+    if (Hls.isSupported()) {
+      const hls = new Hls({ enableWorker: true, lowLatencyMode: false });
+      activeHls = hls;
+      hls.loadSource(streamUrl);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        loading.classList.add('hidden');
+        video.classList.remove('hidden');
+        closeBtn.classList.remove('hidden');
+        video.play();
+      });
+      hls.on(Hls.Events.ERROR, (_, data) => {
+        if (data.fatal) {
+          console.error('[HLS-Archive] fatal error:', data);
+          stopStream(video, img, loading, closeBtn);
+        }
+      });
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = streamUrl;
+      video.addEventListener('loadedmetadata', () => {
+        loading.classList.add('hidden');
+        video.classList.remove('hidden');
+        closeBtn.classList.remove('hidden');
+        video.play();
+      }, { once: true });
+    }
+  } catch (err) {
+    console.error('[Archive] error:', err);
+    loading.classList.add('hidden');
+    video.classList.remove('hidden');
+    isArchiveMode = false;
+    // Show error toast
+    const msg = err.message || '';
+    const archiveMatch = msg.match(/Архив доступен с ([\d.]+\s[\d:]+)/);
+    const text = archiveMatch ? 'Архив доступен только с ' + archiveMatch[1] : 'Архив недоступен для этого момента';
+    showStreamError(video.closest('.device-media'), text);
+  }
+}
+
+async function startStream(cameraId, video, img, loading, closeBtn) {
+  // Stop any existing stream
+  if (activeHls) {
+    activeHls.destroy();
+    activeHls = null;
+  }
+
+  img.classList.add('hidden');
+  const playIcon = img.parentElement?.querySelector('.device-play-icon');
+  if (playIcon) playIcon.classList.add('hidden');
+  loading.classList.remove('hidden');
+
+  try {
+    const res = await api('/api/stream/' + cameraId);
+    if (res.error) throw new Error(res.error);
+    const streamUrl = res.url;
+
+    if (Hls.isSupported()) {
+      const hls = new Hls({ enableWorker: true, lowLatencyMode: true });
+      activeHls = hls;
+      hls.loadSource(streamUrl);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        loading.classList.add('hidden');
+        video.classList.remove('hidden');
+        closeBtn.classList.remove('hidden');
+        video.play();
+        setupVideoControls(video);
+        const media = video.closest('.device-media');
+        if (media) setupTimeline(media, cameraId, video, img, loading, closeBtn);
+      });
+      hls.on(Hls.Events.ERROR, (_, data) => {
+        if (data.fatal) {
+          console.error('[HLS] fatal error:', data);
+          stopStream(video, img, loading, closeBtn);
+        }
+      });
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      // Safari native HLS
+      video.src = streamUrl;
+      video.addEventListener('loadedmetadata', () => {
+        loading.classList.add('hidden');
+        video.classList.remove('hidden');
+        closeBtn.classList.remove('hidden');
+        video.play();
+        setupVideoControls(video);
+        const media = video.closest('.device-media');
+        if (media) setupTimeline(media, cameraId, video, img, loading, closeBtn);
+      }, { once: true });
+    } else {
+      throw new Error('HLS not supported in this browser');
+    }
+  } catch (err) {
+    console.error('[Stream] error:', err);
+    loading.classList.add('hidden');
+    img.classList.remove('hidden');
+    showStreamError(img.parentElement);
+  }
+}
+
+async function handleOpenDoor(btn, device) {
+  btn.disabled = true;
+  btn.textContent = 'Открытие...';
+  try {
+    await api('/api/open-door', {
+      method: 'POST',
+      body: { placeId: selectedPlace.place.id, device },
+    });
+    const savedHtml = btn.innerHTML;
+    btn.classList.remove('bg-green-600', 'hover:bg-green-700');
+    btn.classList.add('bg-emerald-700');
+    setTimeout(() => {
+      btn.innerHTML = savedHtml;
+      btn.classList.remove('bg-emerald-700');
+      btn.classList.add('bg-green-600', 'hover:bg-green-700');
+      btn.disabled = false;
+    }, 3000);
+  } catch {
+    const savedHtml = btn.innerHTML;
+    btn.classList.add('bg-red-700');
+    setTimeout(() => {
+      btn.innerHTML = savedHtml;
+      btn.classList.remove('bg-red-700');
+      btn.classList.add('bg-green-600', 'hover:bg-green-700');
+      btn.disabled = false;
+    }, 3000);
+  }
+}
+
+async function handleOpenEntrance(btn, accessControlId, entranceId, originalName) {
+  btn.disabled = true;
+  btn.textContent = '...';
+  try {
+    await api('/api/open-entrance', {
+      method: 'POST',
+      body: { placeId: selectedPlace.place.id, accessControlId, entranceId },
+    });
+    btn.textContent = 'Открыто!';
+    setTimeout(() => { btn.textContent = originalName; btn.disabled = false; }, 3000);
+  } catch {
+    btn.textContent = 'Ошибка';
+    setTimeout(() => { btn.textContent = originalName; btn.disabled = false; }, 3000);
+  }
+}
+
+// ─── Auto-start slideshow on call ────────────────
+function autoStartSlideshow() {
+  const img = document.querySelector('.device-snapshot');
+  const loading = document.querySelector('.device-video-loading');
+  const closeBtn = document.querySelector('.device-video-close');
+  const liveBadge = document.querySelector('.device-live-badge');
+  if (!img || !loading || !closeBtn || !liveBadge) return;
+  if (slideshowTimer) return; // already running
+
+  const isSip = devices.length > 0 && devices[0].type === 'SIP';
+  if (!isSip || !selectedPlace) return;
+
+  const placeId = selectedPlace.place.id;
+  const device = devices[0];
+  const snapshotUrl = () => '/api/snapshot/' + placeId + '/' + device.id + '?type=SIP&t=' + Date.now();
+  startSlideshow(snapshotUrl, img, loading, closeBtn, liveBadge);
+}
+
+// ─── SSE & Notifications ────────────────────────
+let eventSource = null;
+let callBannerTimeout = null;
+
+function connectSSE() {
+  if (eventSource) eventSource.close();
+  eventSource = new EventSource('/api/events');
+  eventSource.addEventListener('call', (e) => {
+    const event = JSON.parse(e.data);
+    showCallNotification(event);
+    // Auto-start slideshow on incoming call
+    autoStartSlideshow();
+  });
+  eventSource.onerror = () => {
+    setTimeout(() => connectSSE(), 5000);
+  };
+}
+
+function showCallNotification(event) {
+  // Browser notification
+  if (Notification.permission === 'granted') {
+    new Notification('Звонок в домофон!', {
+      body: event.eventType + (event.date ? ' — ' + new Date(event.date).toLocaleTimeString('ru') : ''),
+      icon: event.previewUrl || undefined,
+      tag: 'domofon-call',
+      requireInteraction: true,
+    });
+  }
+
+  // In-page banner
+  const banner = document.getElementById('call-banner');
+  const bannerText = document.getElementById('call-banner-text');
+  if (banner) {
+    bannerText.textContent = event.eventType + (event.date ? ' — ' + new Date(event.date).toLocaleTimeString('ru') : '');
+    banner.classList.remove('hidden');
+    if (callBannerTimeout) clearTimeout(callBannerTimeout);
+    callBannerTimeout = setTimeout(() => { banner.classList.add('hidden'); }, 30000);
+  }
+}
+
+function requestNotificationPermission() {
+  if ('Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission();
+  }
+}
+
+// ─── Init ───────────────────────────────────────
+async function init() {
+  showLoading();
+  const session = await api('/api/session');
+  if (session.authenticated) {
+    requestNotificationPermission();
+    connectSSE();
+    await loadDashboard();
+  } else {
+    showPhoneForm();
+  }
+}
+
+init();
+</script>
+</body>
+</html>

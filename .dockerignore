@@ -1,0 +1,9 @@
+target
+node_modules
+dist
+decompiled
+data
+src-ts
+.claude
+.git
+*.md

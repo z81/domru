@@ -1,0 +1,6 @@
+dist
+.claude
+decompiled
+node_modules
+data
+target
