@@ -68,6 +68,15 @@ async fn confirm(
         .await?;
     let tokens = client.get_tokens();
     state::save_tokens(&state::tokens_path(), &tokens);
+
+    // Fetch place_id for User-Agent (required for video API)
+    if let Ok(places) = client.get_places().await {
+        if let Some(first) = places.first() {
+            client.set_place_id(first.place.id);
+            tracing::info!("[AUTH] set place_id={} after login", first.place.id);
+        }
+    }
+
     Ok(Json(json!({ "ok": true, "data": { "operatorId": creds.operator_id } })))
 }
 

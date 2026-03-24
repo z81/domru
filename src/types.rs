@@ -56,12 +56,18 @@ pub struct ContractAddress {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(untagged)]
 pub enum LoginResult {
-    #[serde(rename = "needsContract")]
-    NeedsContract { contracts: Vec<ContractAddress> },
-    #[serde(rename = "ready")]
-    Ready { data: LoginInfo },
+    NeedsContract {
+        #[serde(rename = "needsContract")]
+        needs_contract: bool,
+        contracts: Vec<ContractAddress>,
+    },
+    Ready {
+        #[serde(rename = "needsContract")]
+        needs_contract: bool,
+        data: LoginInfo,
+    },
 }
 
 // ─── Places ───────────────────────────────────────────

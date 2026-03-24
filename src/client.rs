@@ -28,6 +28,8 @@ pub struct DomofonClient {
 impl DomofonClient {
     pub fn new() -> Self {
         let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
             .build()
             .expect("failed to build reqwest::Client");
 
@@ -218,19 +220,25 @@ impl DomofonClient {
 
         if status == StatusCode::MULTIPLE_CHOICES {
             let contracts: Vec<ContractAddress> = serde_json::from_str(&text)?;
-            return Ok(LoginResult::NeedsContract { contracts });
+            return Ok(LoginResult::NeedsContract {
+                needs_contract: true,
+                contracts,
+            });
         }
 
         let auth_response: AuthResponse = serde_json::from_str(&text)?;
         let login_info: LoginInfo = serde_json::from_value(auth_response.data)?;
-        Ok(LoginResult::Ready { data: login_info })
+        Ok(LoginResult::Ready {
+            needs_contract: false,
+            data: login_info,
+        })
     }
 
     pub async fn select_contract(
         &mut self,
         phone: &str,
         contract: &ContractAddress,
-    ) -> Result<AuthCredentials, AppError> {
+    ) -> Result<(), AppError> {
         let path = format!("auth/v2/confirmation/{}", urlencoding::encode(phone));
         let mut headers = HeaderMap::new();
         let basic = format!("Basic {}", self.basic_auth(phone));
@@ -239,8 +247,10 @@ impl DomofonClient {
         }
 
         let body = serde_json::to_value(contract)?;
-        self.request(Method::POST, &path, Some(body), Some(headers))
-            .await
+        let _: serde_json::Value = self
+            .request(Method::POST, &path, Some(body), Some(headers))
+            .await?;
+        Ok(())
     }
 
     pub async fn confirm_login(
@@ -499,7 +509,7 @@ impl DomofonClient {
     // ─── Proxy snapshot ──────────────────────────────────
 
     pub async fn proxy_snapshot(
-        &mut self,
+        &self,
         place_id: i64,
         device_id: i64,
         device_type: &str,

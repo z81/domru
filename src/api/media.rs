@@ -47,6 +47,7 @@ pub fn router() -> Router<SharedState> {
         .route("/api/stream", get(redirect_stream_default))
         .route("/api/stream/{camera_id}", get(get_stream))
         .route("/api/stream/{camera_id}/redirect", get(redirect_stream))
+        .route("/api/hls-proxy", get(hls_proxy))
         .route("/api/archive/{camera_id}", get(get_archive))
         .route("/api/events/{camera_id}", get(get_events))
         .route("/api/sip-device", post(create_sip_device))
@@ -70,7 +71,7 @@ async fn proxy_snapshot(
         height,
     );
 
-    let mut client = state.client.write().await;
+    let client = state.client.read().await;
 
     // Retry once on 5xx (upstream API is flaky)
     let data = match client
@@ -132,6 +133,84 @@ async fn redirect_stream(
     client.refresh_video_session(&camera_id).await?;
     let stream = client.get_video_stream(&camera_id).await?;
     Ok(Redirect::temporary(&stream.data.url))
+}
+
+#[derive(Deserialize)]
+struct HlsProxyParams {
+    url: String,
+}
+
+/// Proxy HLS m3u8 and .ts chunks to bypass CORS restrictions.
+/// Rewrites URLs inside m3u8 playlists to also go through this proxy.
+async fn hls_proxy(
+    Query(params): Query<HlsProxyParams>,
+) -> Result<impl IntoResponse, AppError> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| AppError::Api { status: 502, message: e.to_string() })?;
+
+    let resp = client.get(&params.url).send().await.map_err(|e| {
+        tracing::error!("[HLS-PROXY] fetch error: {}", e);
+        AppError::Api { status: 502, message: format!("HLS proxy fetch failed: {}", e) }
+    })?;
+
+    let content_type = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+
+    let body_bytes = resp.bytes().await.map_err(|e| {
+        AppError::Api { status: 502, message: format!("HLS proxy read failed: {}", e) }
+    })?;
+
+    // If it's an m3u8 playlist, rewrite internal URLs to go through proxy
+    if content_type.contains("mpegurl") || content_type.contains("m3u8") || params.url.ends_with(".m3u8") {
+        let text = String::from_utf8_lossy(&body_bytes);
+        let base_url = params.url.rsplit_once('/').map(|(b, _)| b).unwrap_or("");
+        let mut rewritten = String::with_capacity(text.len() * 2);
+
+        for line in text.lines() {
+            if line.starts_with('#') || line.is_empty() {
+                rewritten.push_str(line);
+            } else {
+                // This is a URL line — could be relative or absolute
+                let full_url = if line.starts_with("http://") || line.starts_with("https://") {
+                    line.to_string()
+                } else {
+                    format!("{}/{}", base_url, line)
+                };
+                rewritten.push_str(&format!(
+                    "/api/hls-proxy?url={}",
+                    urlencoding::encode(&full_url)
+                ));
+            }
+            rewritten.push('\n');
+        }
+
+        return Ok((
+            [
+                (header::CONTENT_TYPE, "application/vnd.apple.mpegurl".to_string()),
+                (header::CACHE_CONTROL, "no-cache".to_string()),
+                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".to_string()),
+            ],
+            rewritten,
+        )
+            .into_response());
+    }
+
+    // For .ts chunks, just proxy the bytes
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "no-cache".to_string()),
+            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".to_string()),
+        ],
+        body_bytes,
+    )
+        .into_response())
 }
 
 #[derive(Deserialize)]
