@@ -119,59 +119,74 @@ async fn spawn_sip_client(state: SharedState, saved_creds: Option<types::SipCred
     tokio::spawn(async move {
         // Wait for server to boot
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        tracing::info!("[SIP] Starting SIP client initialization...");
 
-        // Check auth
-        {
-            let client = state.client.read().await;
-            if !client.is_authenticated() {
-                tracing::info!("[SIP] Not authenticated, skipping SIP registration");
-                return;
+        loop {
+            tracing::info!("[SIP] Starting SIP client initialization...");
+
+            // Wait until authenticated (poll every 10s)
+            loop {
+                let authed = state.client.read().await.is_authenticated();
+                if authed {
+                    break;
+                }
+                tracing::info!("[SIP] Not authenticated yet, waiting...");
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             }
-        }
 
-        // Refresh token first (with timeout)
-        tracing::info!("[SIP] Refreshing token...");
-        {
-            let refresh_result = tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                async {
-                    let mut client = state.client.write().await;
-                    let result = client.refresh_session().await;
-                    if result.is_ok() {
-                        let tokens = client.get_tokens();
-                        state::save_tokens(&state::tokens_path(), &tokens);
+            // Refresh token first (with timeout)
+            tracing::info!("[SIP] Refreshing token...");
+            {
+                let refresh_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    async {
+                        let mut client = state.client.write().await;
+                        let result = client.refresh_session().await;
+                        if result.is_ok() {
+                            let tokens = client.get_tokens();
+                            state::save_tokens(&state::tokens_path(), &tokens);
+                        }
+                        result
                     }
-                    result
-                }
-            ).await;
+                ).await;
 
-            match refresh_result {
-                Ok(Ok(_)) => tracing::info!("[SIP] Token refreshed"),
-                Ok(Err(e)) => tracing::error!("[SIP] Token refresh failed: {}", e),
-                Err(_) => tracing::error!("[SIP] Token refresh timed out"),
-            }
-        }
-
-        // Load or create SIP credentials
-        let creds = if let Some(c) = saved_creds {
-            tracing::info!("[SIP] Loaded credentials: {}@{}", c.login, c.realm);
-            c
-        } else {
-            // Try to create SIP device
-            match create_sip_device(&state).await {
-                Some(c) => c,
-                None => {
-                    tracing::info!("[SIP] No SIP credentials available. Call detection disabled.");
-                    return;
+                match refresh_result {
+                    Ok(Ok(_)) => tracing::info!("[SIP] Token refreshed"),
+                    Ok(Err(e)) => {
+                        tracing::error!("[SIP] Token refresh failed: {}, retrying in 30s", e);
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                        continue;
+                    }
+                    Err(_) => {
+                        tracing::error!("[SIP] Token refresh timed out, retrying in 30s");
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                        continue;
+                    }
                 }
             }
-        };
 
-        // Run SIP client (loops forever with re-registration)
-        let sip = SipClient::new(creds, call_tx, state.clone());
-        if let Err(e) = sip.run().await {
-            tracing::error!("[SIP] SIP client error: {}", e);
+            // Load or create SIP credentials
+            let creds = if let Some(ref c) = saved_creds {
+                tracing::info!("[SIP] Loaded credentials: {}@{}", c.login, c.realm);
+                c.clone()
+            } else {
+                match create_sip_device(&state).await {
+                    Some(c) => c,
+                    None => {
+                        tracing::error!("[SIP] Failed to create SIP device, retrying in 60s");
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        continue;
+                    }
+                }
+            };
+
+            // Run SIP client (loops forever with re-registration)
+            let sip = SipClient::new(creds, call_tx.clone(), state.clone());
+            if let Err(e) = sip.run().await {
+                tracing::error!("[SIP] SIP client crashed: {}, restarting in 10s", e);
+            } else {
+                tracing::warn!("[SIP] SIP client exited, restarting in 10s");
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         }
     });
 }
