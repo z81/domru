@@ -247,14 +247,23 @@ impl SipClient {
             ).await;
 
             if answered.is_ok() {
-                // Answer: send 200 OK
-                tracing::info!("[SIP] Answering call (200 OK)");
-                let ok = build_response(text, "200 OK");
+                // Answer: send 200 OK with SDP answer
+                tracing::info!("[SIP] Answering call (200 OK with SDP)");
+                let ok = build_200ok_with_sdp(text, public_ip, LOCAL_PORT);
                 if let Err(err) = socket.send_to(ok.as_bytes(), dest).await {
                     tracing::error!("[SIP] Send 200 OK error: {}", err);
                 }
-                // Wait a bit then send BYE to hang up
-                time::sleep(Duration::from_secs(2)).await;
+
+                // Wait for ACK (up to 5 seconds), then send BYE
+                let ack_timeout = Duration::from_secs(5);
+                let ack_result = wait_for_ack(socket, ack_timeout).await;
+                if ack_result {
+                    tracing::info!("[SIP] ACK received, sending BYE");
+                } else {
+                    tracing::warn!("[SIP] ACK not received, sending BYE anyway");
+                }
+
+                time::sleep(Duration::from_millis(500)).await;
                 let bye = build_bye(text, &self.credentials, public_ip, LOCAL_PORT);
                 if let Err(err) = socket.send_to(bye.as_bytes(), dest).await {
                     tracing::error!("[SIP] Send BYE error: {}", err);
@@ -600,6 +609,142 @@ fn days_to_date(days_since_epoch: u64) -> (u64, u64, u64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+/// Wait for ACK message on the socket.
+async fn wait_for_ack(socket: &UdpSocket, timeout: Duration) -> bool {
+    let mut buf = vec![0u8; 4096];
+    match time::timeout(timeout, async {
+        loop {
+            if let Ok((len, _)) = socket.recv_from(&mut buf).await {
+                let text = String::from_utf8_lossy(&buf[..len]);
+                let first = text.lines().next().unwrap_or("");
+                if first.starts_with("ACK ") {
+                    return true;
+                }
+                // Skip other messages while waiting for ACK
+            }
+        }
+    }).await.unwrap_or_default()
+}
+
+/// Extract SDP body from a SIP message (everything after the double CRLF).
+fn extract_sdp(text: &str) -> Option<&str> {
+    let idx = text.find("\r\n\r\n")?;
+    let body = &text[idx + 4..];
+    if body.starts_with("v=") {
+        Some(body)
+    } else {
+        None
+    }
+}
+
+/// Parse the first audio codec from SDP's m=audio line.
+/// Returns (payload_type, codec_name) e.g. (0, "PCMU/8000").
+fn parse_sdp_audio_codec(sdp: &str) -> (u32, &str) {
+    for line in sdp.lines() {
+        if line.starts_with("m=audio") {
+            // m=audio 12345 RTP/AVP 0 8 101
+            // Take first payload type after RTP/AVP
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 4 {
+                if let Ok(pt) = parts[3].parse::<u32>() {
+                    // Map common payload types
+                    let name = match pt {
+                        0 => "PCMU/8000",
+                        8 => "PCMA/8000",
+                        _ => "PCMU/8000",
+                    };
+                    return (pt, name);
+                }
+            }
+        }
+    }
+    (0, "PCMU/8000") // default
+}
+
+/// Build a 200 OK response with SDP answer for an INVITE.
+fn build_200ok_with_sdp(invite_text: &str, public_ip: &str, local_port: u16) -> String {
+    let lines: Vec<&str> = invite_text.split("\r\n").collect();
+
+    let mut via_lines: Vec<&str> = Vec::new();
+    let mut from_line = "";
+    let mut to_line = "";
+    let mut call_id_line = "";
+    let mut cseq_line = "";
+    let mut contact_line = "";
+
+    for line in &lines {
+        let lower = line.to_ascii_lowercase();
+        if lower.starts_with("via:") || lower.starts_with("v:") {
+            via_lines.push(line);
+        } else if from_line.is_empty() && (lower.starts_with("from:") || lower.starts_with("f:")) {
+            from_line = line;
+        } else if to_line.is_empty() && (lower.starts_with("to:") || lower.starts_with("t:")) {
+            to_line = line;
+        } else if call_id_line.is_empty() && (lower.starts_with("call-id:") || lower.starts_with("i:")) {
+            call_id_line = line;
+        } else if cseq_line.is_empty() && lower.starts_with("cseq:") {
+            cseq_line = line;
+        } else if contact_line.is_empty() && (lower.starts_with("contact:") || lower.starts_with("m:")) {
+            contact_line = line;
+        }
+    }
+
+    // Add tag to To if not present (required for dialog)
+    let to_with_tag = if to_line.contains("tag=") {
+        to_line.to_string()
+    } else {
+        format!("{};tag={}", to_line, random_tag())
+    };
+
+    // Parse incoming SDP to match codec
+    let sdp = extract_sdp(invite_text);
+    let (pt, codec_name) = sdp.map(parse_sdp_audio_codec).unwrap_or((0, "PCMU/8000"));
+
+    // Dummy RTP port — we won't actually send/receive media
+    let rtp_port = 20000;
+
+    // Build SDP answer
+    let sdp_answer = format!(
+        "v=0\r\n\
+         o=- {} 1 IN IP4 {}\r\n\
+         s=-\r\n\
+         c=IN IP4 {}\r\n\
+         t=0 0\r\n\
+         m=audio {} RTP/AVP {}\r\n\
+         a=rtpmap:{} {}\r\n\
+         a=sendrecv\r\n",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0))
+            .as_secs(),
+        public_ip,
+        public_ip,
+        rtp_port,
+        pt,
+        pt,
+        codec_name,
+    );
+
+    let mut resp = vec![
+        "SIP/2.0 200 OK".to_string(),
+    ];
+    for via in &via_lines {
+        resp.push(via.to_string());
+    }
+    resp.push(from_line.to_string());
+    resp.push(to_with_tag);
+    resp.push(call_id_line.to_string());
+    resp.push(cseq_line.to_string());
+    resp.push(format!("Contact: <sip:domofon@{public_ip}:{local_port};transport=udp>"));
+    resp.push("Content-Type: application/sdp".to_string());
+    resp.push(format!("Content-Length: {}", sdp_answer.len()));
+    resp.push(format!("User-Agent: {USER_AGENT}"));
+    resp.push(String::new());
+    resp.push(sdp_answer);
+
+    resp.join("\r\n")
 }
 
 /// Build a SIP BYE from the original INVITE to hang up.

@@ -66,7 +66,7 @@ async fn answer_and_open(
     }
 
     // Tell SIP client to answer (200 OK)
-    if let Err(_) = state.sip_answer_tx.try_send(()) {
+    if state.sip_answer_tx.try_send(()).is_err() {
         tracing::warn!("[DOOR] SIP answer channel full or closed");
     }
 

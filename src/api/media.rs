@@ -152,7 +152,7 @@ async fn hls_proxy(
 
     let resp = client.get(&params.url).send().await.map_err(|e| {
         tracing::error!("[HLS-PROXY] fetch error: {}", e);
-        AppError::Api { status: 502, message: format!("HLS proxy fetch failed: {}", e) }
+        AppError::Api { status: 502, message: format!("HLS proxy fetch failed: {e}") }
     })?;
 
     let content_type = resp
@@ -163,7 +163,7 @@ async fn hls_proxy(
         .to_string();
 
     let body_bytes = resp.bytes().await.map_err(|e| {
-        AppError::Api { status: 502, message: format!("HLS proxy read failed: {}", e) }
+        AppError::Api { status: 502, message: format!("HLS proxy read failed: {e}") }
     })?;
 
     // If it's an m3u8 playlist, rewrite internal URLs to go through proxy
@@ -180,7 +180,7 @@ async fn hls_proxy(
                 let full_url = if line.starts_with("http://") || line.starts_with("https://") {
                     line.to_string()
                 } else {
-                    format!("{}/{}", base_url, line)
+                    format!("{base_url}/{line}")
                 };
                 rewritten.push_str(&format!(
                     "/api/hls-proxy?url={}",
