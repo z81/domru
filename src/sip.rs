@@ -614,7 +614,7 @@ fn days_to_date(days_since_epoch: u64) -> (u64, u64, u64) {
 /// Wait for ACK message on the socket.
 async fn wait_for_ack(socket: &UdpSocket, timeout: Duration) -> bool {
     let mut buf = vec![0u8; 4096];
-    match time::timeout(timeout, async {
+    let result = time::timeout(timeout, async {
         loop {
             if let Ok((len, _)) = socket.recv_from(&mut buf).await {
                 let text = String::from_utf8_lossy(&buf[..len]);
@@ -622,10 +622,11 @@ async fn wait_for_ack(socket: &UdpSocket, timeout: Duration) -> bool {
                 if first.starts_with("ACK ") {
                     return true;
                 }
-                // Skip other messages while waiting for ACK
             }
         }
-    }).await.unwrap_or_default()
+    })
+    .await;
+    result.unwrap_or(false)
 }
 
 /// Extract SDP body from a SIP message (everything after the double CRLF).
