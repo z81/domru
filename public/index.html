@@ -919,6 +919,8 @@ function setupTimeline(media, cameraId, video, img, loading, closeBtn) {
     const rect = bar.getBoundingClientRect();
     const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
     const ts = Math.floor(rangeStart + pct * range);
+    const cursor = tl.querySelector('.tl-cursor');
+    if (cursor) cursor.style.left = (pct * 100) + '%';
     loadArchive(cameraId, ts, video, img, loading, closeBtn, rightBtn);
     setTimeout(updateNavButtons, 500);
   };
@@ -967,6 +969,7 @@ function setupTimeline(media, cameraId, video, img, loading, closeBtn) {
     const prev = sorted.filter(e => e.Time < ref - 5).pop();
     if (prev) {
       currentArchiveTs = prev.Time;
+      updateTimelineCursor(media, prev.Time);
       loadArchive(cameraId, prev.Time, video, img, loading, closeBtn, rightBtn);
       setTimeout(updateNavButtons, 500);
     }
@@ -977,6 +980,7 @@ function setupTimeline(media, cameraId, video, img, loading, closeBtn) {
       // Go to LIVE
       isArchiveMode = false;
       currentArchiveTs = 0;
+      updateTimelineCursor(media, null);
       startStream(cameraId, video, img, loading, closeBtn);
       setTimeout(updateNavButtons, 500);
     } else {
@@ -986,6 +990,7 @@ function setupTimeline(media, cameraId, video, img, loading, closeBtn) {
       const next = sorted.find(e => e.Time > ref + 5);
       if (next) {
         currentArchiveTs = next.Time;
+        updateTimelineCursor(media, next.Time);
         loadArchive(cameraId, next.Time, video, img, loading, closeBtn, rightBtn);
         setTimeout(updateNavButtons, 500);
       }
@@ -1021,17 +1026,41 @@ function findNearbyEvent(events, ts, threshold) {
   return best;
 }
 
+function updateTimelineCursor(media, ts) {
+  if (!media) return;
+  const tl = media.querySelector('.device-timeline');
+  if (!tl) return;
+  const cursor = tl.querySelector('.tl-cursor');
+  if (!cursor) return;
+  const rangeStart = parseInt(tl.dataset.start || '0');
+  const rangeEnd = parseInt(tl.dataset.end || '0');
+  const range = rangeEnd - rangeStart;
+  if (range <= 0) return;
+  // ts=null means live (right edge)
+  const t = ts == null ? Math.floor(Date.now() / 1000) : ts;
+  const pct = Math.max(0, Math.min(100, ((t - rangeStart) / range) * 100));
+  cursor.style.left = pct + '%';
+}
+
+let loadArchiveGeneration = 0;
+
 async function loadArchive(cameraId, ts, video, img, loading, closeBtn, liveBtn) {
+  const gen = ++loadArchiveGeneration;
   isArchiveMode = true;
   currentArchiveTs = ts;
+  video.pause();
   if (activeHls) { activeHls.destroy(); activeHls = null; }
   img.classList.add('hidden');
   const playIcon = img.parentElement?.querySelector('.device-play-icon');
   if (playIcon) playIcon.classList.add('hidden');
   loading.classList.remove('hidden');
 
+  // Update cursor position
+  updateTimelineCursor(video.closest('.device-media'), ts);
+
   try {
     const res = await api('/api/archive/' + cameraId + '?ts=' + ts + '&tz=10800');
+    if (gen !== loadArchiveGeneration) return; // stale request
     if (res.error) throw new Error(res.error);
     const streamUrl = res.url;
 
@@ -1041,13 +1070,14 @@ async function loadArchive(cameraId, ts, video, img, loading, closeBtn, liveBtn)
       hls.loadSource(streamUrl);
       hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (gen !== loadArchiveGeneration) return;
         loading.classList.add('hidden');
         video.classList.remove('hidden');
         closeBtn.classList.remove('hidden');
-        video.play();
+        video.play().catch(() => {});
       });
       hls.on(Hls.Events.ERROR, (_, data) => {
-        if (data.fatal) {
+        if (data.fatal && gen === loadArchiveGeneration) {
           console.error('[HLS-Archive] fatal error:', data);
           stopStream(video, img, loading, closeBtn);
         }
@@ -1055,18 +1085,19 @@ async function loadArchive(cameraId, ts, video, img, loading, closeBtn, liveBtn)
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
       video.src = streamUrl;
       video.addEventListener('loadedmetadata', () => {
+        if (gen !== loadArchiveGeneration) return;
         loading.classList.add('hidden');
         video.classList.remove('hidden');
         closeBtn.classList.remove('hidden');
-        video.play();
+        video.play().catch(() => {});
       }, { once: true });
     }
   } catch (err) {
+    if (gen !== loadArchiveGeneration) return;
     console.error('[Archive] error:', err);
     loading.classList.add('hidden');
     video.classList.remove('hidden');
     isArchiveMode = false;
-    // Show error toast
     const msg = err.message || '';
     const archiveMatch = msg.match(/Архив доступен с ([\d.]+\s[\d:]+)/);
     const text = archiveMatch ? 'Архив доступен только с ' + archiveMatch[1] : 'Архив недоступен для этого момента';
@@ -1076,15 +1107,22 @@ async function loadArchive(cameraId, ts, video, img, loading, closeBtn, liveBtn)
 
 async function startStream(cameraId, video, img, loading, closeBtn) {
   // Stop any existing stream
+  video.pause();
   if (activeHls) {
     activeHls.destroy();
     activeHls = null;
   }
+  isArchiveMode = false;
+  currentArchiveTs = 0;
+  loadArchiveGeneration++;
 
   img.classList.add('hidden');
   const playIcon = img.parentElement?.querySelector('.device-play-icon');
   if (playIcon) playIcon.classList.add('hidden');
   loading.classList.remove('hidden');
+
+  // Move cursor to live position (100%)
+  updateTimelineCursor(video.closest('.device-media'), null);
 
   try {
     const res = await api('/api/stream/' + cameraId);
@@ -1100,7 +1138,7 @@ async function startStream(cameraId, video, img, loading, closeBtn) {
         loading.classList.add('hidden');
         video.classList.remove('hidden');
         closeBtn.classList.remove('hidden');
-        video.play();
+        video.play().catch(() => {});
         setupVideoControls(video);
         const media = video.closest('.device-media');
         if (media) setupTimeline(media, cameraId, video, img, loading, closeBtn);
@@ -1118,7 +1156,7 @@ async function startStream(cameraId, video, img, loading, closeBtn) {
         loading.classList.add('hidden');
         video.classList.remove('hidden');
         closeBtn.classList.remove('hidden');
-        video.play();
+        video.play().catch(() => {});
         setupVideoControls(video);
         const media = video.closest('.device-media');
         if (media) setupTimeline(media, cameraId, video, img, loading, closeBtn);
